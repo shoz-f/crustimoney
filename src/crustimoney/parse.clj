@@ -1,61 +1,187 @@
-(ns crustimoney.parse
-  "This namespace contains the functions that should be called by the users
-  of this library. The main function is `parse`."
-  (:require [crustimoney.internal.core :as core])
-  (:use [crustimoney.internal.utils]
-        [crustimoney.i18n :only (i18n)]))
+(ns crustimoney.parse)
 
+(def grammar {:expr   [:sum]
+              :sum    [:number :op :sum / :number]
+              :op     #"^\+|-"
+              :number #"^\d+"})
 
-;;; Private helper functions.
+;; ;; model
 
-(defn- make-error
-  "Create an error map based on the arguments."
-  [errors line column pos]
-  {:error (mapify errors line column pos)})
+;; {:grammar ...
+;;  :input ...
+;;  :steps
+;;  [{:rule [:sum]
+;;    :pos 0
+;;    :value nil}
 
+;;   {:rule :sum
+;;    :pos 0
+;;    :value nil}
 
-;;; Main functions.
+;;   {:rule [:number :op :sum / :number]
+;;    :pos 0
+;;    :value nil}
 
-(defn parse
-  "Parse the given `text` string using the specified `rules` map, starting from
-  the rule specified by the `start` keyword. See the documentation on how to
-  create a rules map.
+;;   {:rule :number
+;;    :pos 0
+;;    :value nil}
 
-  This function returns either a map with either a `:succes` or an `:error` key
-  in it. The value of the `:succes` key is the abstract syntax tree (AST). See
-  the documentation on how this AST is stuctured.
+;;   {:rule #"^\d+"
+;;    :pos 0
+;;    :value nil}
 
-  The value of the `:error` key is a map with the following keys:
+;;   {:rule :op
+;;    :pos 2
+;;    :value "42"}
 
-  - `:errors` contains a set with possible parse errors.
-  - `:line`   contains the line number of where the error(s) occured.
-  - `:column` contains the column number of where the error(s) occured in the
-              line.
-  - `:pos`    contains the overall character position of where the error occured."
-  [rules start text]
-  (let [init-state (core/map->State {:rules rules
-                                     :remainder text
-                                     :pos 0
-                                     :errors #{}
-                                     :errors-pos 0})
-        result (core/parse-nonterminal start init-state)]
-    (if-let [succes (:succes result)]
-      ;; Check whether all the text has been parsed.
-      (if (empty? (get-in succes [:new-state :remainder]))
-        {:succes (:content succes)}
-        (let [errors (get-in succes [:new-state :errors])
-              errors-pos (if (empty? errors)
-                            (get-in succes [:new-state :pos])
-                            (get-in succes [:new-state :errors-pos]))
-              errors (if (empty? errors) #{(i18n :expected-eof)} errors)
-              [line column] (core/line-and-column errors-pos text)]
-          (make-error errors line column errors-pos)))
-      (let [errors-pos (:errors-pos result)
-            [line column] (core/line-and-column errors-pos text)]
-        (make-error (:errors result) line column errors-pos)))))
+;;   {:rule #"^\+|-"
+;;    :pos 2
+;;    :value "42"}
 
-(defn with-spaces
-  "This function returns a vector with mandatory white-space between the
-  specified items."
-  [& items]
-  (into [] (interpose #"\s+" items)))
+;;   {:rule :sum
+;;    :pos 3
+;;    :value "+"}
+
+;;   {:rule [:number :op :sum / :number]
+;;    :pos 3
+;;    :value "+"}
+
+;;   {:rule :number
+;;    :pos 3
+;;    :value "+"}
+
+;;   {:rule #"^\d+"
+;;    :pos 3
+;;    :value "+"}
+
+;;   {:rule :op
+;;    :pos 4
+;;    :value "2"}
+
+;;   {:rule #"^\+|-"
+;;    :pos 4
+;;    :value "2"}
+
+;;   {:rule :sum
+;;    :pos 5
+;;    :value "-"}
+
+;;   {:rule [:number]
+;;    :pos 5
+;;    :value "-"}
+
+;;   {:rule :number
+;;    :pos 5
+;;    :value "-"}
+
+;;   {:rule #"^\d+"
+;;    :pos 5
+;;    :value "-"}
+
+;;   {:rule nil
+;;    :pos 8
+;;    :value "100"}]}
+
+;; value
+
+;; 1. take "100", search for terminal (in this case #"^\d+") and add
+;;    to map with non-terminal above (in this case :number) as key.
+;; 2. take value of non-terminal from former step, so "-"
+;; 3. search for terminal (#"^\+|-") and use non-terminal above :op,
+;;    but as it has passed another non-terminal, first wrap current
+;;    value with that as key.
+
+;; {:sum {:number "42" :op "+" :sum {:number "2" :op "-" :sum {:number "100"}}}}
+
+;; recursion
+
+;; inside out: if a key holds a map, check whether that map holds a
+;; map (or seq) with the same key, if so, put those maps in a seq as
+;; the value.
+
+(defn- regex? [v] (instance? java.util.regex.Pattern v))
+
+(defn- mk-state [grammar start input]
+  {:grammar grammar
+   :input input
+   :steps [{:rule (get grammar start)
+            :pos 0}]})
+
+(defn- forward [state value pos+]
+  (prn state)
+  (let [steps (:steps state)
+        lstep (last steps)]
+    (loop [i (dec (count steps))]
+      (if (< i 0)
+        {:done (update state :steps conj (assoc lstep
+                                                :rule nil
+                                                :value value
+                                                :pos (+ (:pos lstep) (count value))))
+         :success? true}
+        (let [step (nth steps i)
+              rule (:rule step)]
+          (if (and (vector? rule) (not (contains? #{/ nil} (second rule))))
+            (-> (update step :rule (comp vec rest))
+                (->> (update state :steps assoc i))
+                (update :steps conj (assoc lstep
+                                           :rule (second rule)
+                                           :value value
+                                           :pos (+ (:pos lstep) pos+))))
+            (recur (dec i))))))))
+
+(defn- backward [state]
+  (let [steps (:steps state)]
+    (loop [i (dec (count steps))]
+      (if (< i 0)
+        {:done state
+         :success? false}
+        (let [step (nth steps i)
+              rule (:rule step)]
+          (if-let [alt (and (vector? rule) (seq (drop-while #(not= % /) rule)))]
+            (-> state
+                (update :steps #(vec (take i %)))
+                (update :steps conj (assoc step :rule (vec alt)))
+                (forward (:value step) 0))
+            (recur (dec i))))))))
+
+(defn- advance [state]
+  (let [step  (-> state :steps last)
+        rule  (-> step :rule)
+        input (-> state :input)
+        pos   (-> step :pos)]
+    (cond (vector? rule)
+          (update state :steps conj (assoc step :rule (first rule)))
+
+          (keyword? rule)
+          (update state :steps conj (assoc step :rule (get (:grammar state) rule)))
+
+          (regex? rule)
+          (if-let [found (re-find rule (subs input pos))]
+            (forward state found (count found))
+            (backward state)))))
+
+(defn- mk-value [state]
+  (loop [result {}
+         value (-> state :steps last :value)
+         steps (-> state :steps reverse rest)
+         wrap? true]
+    (if-let [step (first steps)]
+      (let [rule (:rule step)]
+        (cond (and (keyword? rule) wrap?)
+              (recur {rule result} value (rest steps) true)
+
+              (keyword? rule)
+              (recur (assoc result rule value) (:value step) (rest steps) true)
+
+              (regex? rule)
+              (recur result value (rest steps) false)
+
+              (vector? rule)
+              (recur result value (rest steps) wrap?)))
+      result)))
+
+(defn parse [grammar start input]
+  (loop [s (mk-state grammar start input)]
+    (if-let [d (:done s)]
+      (mk-value d)
+      (recur (advance s)))))

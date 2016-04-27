@@ -1,22 +1,38 @@
 (ns crustimoney.parse
-  (:require [clojure.walk :refer (postwalk)]))
+  (:require [clojure.string :as str]
+            [clojure.walk :refer (postwalk)]))
 
 (defn- regex? [v] (instance? java.util.regex.Pattern v))
 
 (defn- mk-state [grammar start input]
   {:grammar grammar
-   :input input
-   :steps [{:rule (get grammar start)
-            :pos 0}]})
+   :input   input
+   :steps   [{:rule start
+              :pos  0}]})
+
+(defn- update-errors [state pos message]
+  (update state :errors
+          (fn [{:keys [messages at]}]
+            {:at       pos
+             :messages (conj (if (= pos at) messages #{})
+                             message)})))
 
 (defn- forward [state value]
-  (let [steps (:steps state)
+  (let [steps      (:steps state)
         last-index (dec (count steps))
-        last-step (nth steps last-index)]
+        last-step  (nth steps last-index)
+        new-pos    (+ (:pos last-step) (count value))]
     (loop [i last-index]
       (if (< i 0)
-        {:done (cond-> state value (assoc-in [:steps last-index :value] value))
-         :success? true}
+        {:done (cond-> state
+                 value
+                 (assoc-in [:steps last-index :value] value)
+
+                 (< new-pos (count (:input state)))
+                 (update-errors new-pos "Expected EOF")
+
+                 (= new-pos (count (:input state)))
+                 (dissoc :errors))}
         (let [step (nth steps i)
               rule (:rule step)]
           (if (and (vector? rule) (not (contains? #{/ nil} (second rule))))
@@ -24,21 +40,22 @@
                 (update-in [:steps i :rule] (comp vec rest))
                 (cond-> value (assoc-in [:steps last-index :value] value))
                 (update :steps conj {:rule (second rule)
-                                     :pos (+ (:pos last-step) (count value))}))
+                                     :pos  new-pos}))
             (recur (dec i))))))))
 
-(defn- backward [state]
-  (let [steps (:steps state)]
+(defn- backward [state error]
+  (let [steps    (:steps state)
+        last-pos (-> steps last :pos)]
     (loop [i (dec (count steps))]
       (if (< i 0)
-        {:done state
-         :success? false}
+        {:done (update-errors state last-pos error)}
         (let [step (nth steps i)
               rule (:rule step)]
           (if-let [alt (and (vector? rule) (seq (drop-while #(not= % /) rule)))]
             (-> state
                 (update :steps #(vec (take i %)))
                 (update :steps conj {:rule (vec alt) :pos (:pos step)})
+                (update-errors last-pos error)
                 (forward nil))
             (recur (dec i))))))))
 
@@ -54,14 +71,24 @@
           (update state :steps conj {:rule (get (:grammar state) rule) :pos pos})
 
           (regex? rule)
-          (if-let [found (re-find rule (subs input pos))]
+          (if-let [found (and (re-find rule (subs input pos)))]
             (forward state found)
-            (backward state)))))
+            (backward state (format "Expected match of '%s'" rule)))
+
+          (string? rule)
+          (if (str/starts-with? (subs input pos) rule)
+            (forward state rule)
+            (backward state (format "Expected string '%s'" rule)))
+
+          (char? rule)
+          (if (and (< pos (count input)) (= (nth input pos) rule))
+            (forward state (str rule))
+            (backward state (format "Expected character '%s'" rule))))))
 
 
 (defn- mk-value [state]
-  (loop [value nil
-         steps (-> state :steps reverse)
+  (loop [value  nil
+         steps  (-> state :steps reverse)
          result {}]
     (if-let [step (first steps)]
       (let [rule (:rule step)]
@@ -90,7 +117,8 @@
 (defn parse [grammar start input]
   (loop [s (mk-state grammar start input)]
     (if-let [d (:done s)]
-      (when (:success? s)
+      (if-let [e (:errors d)]
+        e
         (-> (mk-value d) (mk-flat)))
       (recur (advance s)))))
 

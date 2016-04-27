@@ -1,6 +1,7 @@
 (ns crustimoney.parse
   (:require [clojure.string :as str]
-            [clojure.walk :refer (postwalk)]))
+            [clojure.walk :refer (postwalk)])
+  (:import [java.io BufferedReader StringReader]))
 
 (defn- regex? [v] (instance? java.util.regex.Pattern v))
 
@@ -34,7 +35,7 @@
     (loop [i last-index]
       (if (< i 0)
         (if (< new-pos (count (:input state)))
-          (backward state "Expected EOF")
+          (backward (update state :steps conj {:pos new-pos}) "Expected EOF")
           {:done (-> state
                      (dissoc :errors)
                      (cond-> value (assoc-in [:steps last-index :value] value)))})
@@ -119,11 +120,16 @@
                 form))
             value))
 
+(defn- pos->line+column [input pos]
+  (let [lines (-> (subs input 0 (inc pos)) (StringReader.) (BufferedReader.) (line-seq))]
+    {:line   (count lines)
+     :column (count (last lines))}))
+
 (defn parse [grammar start input]
   (loop [s (mk-state grammar start input)]
     (if-let [d (:done s)]
       (if-let [e (:errors d)]
-        d
+        (update e :at #(assoc (pos->line+column input %) :pos %))
         (-> (mk-value d) (mk-flat)))
       (recur (advance s)))))
 

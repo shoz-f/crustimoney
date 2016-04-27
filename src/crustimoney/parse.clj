@@ -4,8 +4,15 @@
 
 (defn- regex? [v] (instance? java.util.regex.Pattern v))
 
+(defn- preprocess-grammar [grammar]
+  (postwalk (fn [form]
+              (if (regex? form)
+                (re-pattern (str "^" (.pattern form)))
+                form))
+            grammar))
+
 (defn- mk-state [grammar start input]
-  {:grammar grammar
+  {:grammar (preprocess-grammar grammar)
    :input   input
    :steps   [{:rule start
               :pos  0}]})
@@ -17,6 +24,8 @@
              :messages (conj (if (= pos at) messages #{})
                              message)})))
 
+(declare backward)
+
 (defn- forward [state value]
   (let [steps      (:steps state)
         last-index (dec (count steps))
@@ -24,15 +33,11 @@
         new-pos    (+ (:pos last-step) (count value))]
     (loop [i last-index]
       (if (< i 0)
-        {:done (cond-> state
-                 value
-                 (assoc-in [:steps last-index :value] value)
-
-                 (< new-pos (count (:input state)))
-                 (update-errors new-pos "Expected EOF")
-
-                 (= new-pos (count (:input state)))
-                 (dissoc :errors))}
+        (if (< new-pos (count (:input state)))
+          (backward state "Expected EOF")
+          {:done (-> state
+                     (dissoc :errors)
+                     (cond-> value (assoc-in [:steps last-index :value] value)))})
         (let [step (nth steps i)
               rule (:rule step)]
           (if (and (vector? rule) (not (contains? #{/ nil} (second rule))))
@@ -72,7 +77,7 @@
 
           (regex? rule)
           (if-let [found (and (re-find rule (subs input pos)))]
-            (forward state found)
+            (forward state (cond-> found (sequential? found) first))
             (backward state (format "Expected match of '%s'" rule)))
 
           (string? rule)
@@ -118,7 +123,7 @@
   (loop [s (mk-state grammar start input)]
     (if-let [d (:done s)]
       (if-let [e (:errors d)]
-        e
+        d
         (-> (mk-value d) (mk-flat)))
       (recur (advance s)))))
 
@@ -165,6 +170,4 @@
 
   (mk-flat *1)
   ;;=>
-  {:sum [{:op "+", :number "40"} {:number "2"}]}
-
-  )
+  {:sum [{:op "+", :number "40"} {:number "2"}]})

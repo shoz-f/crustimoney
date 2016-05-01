@@ -6,7 +6,9 @@ import clojure.lang.Keyword;
 import clojure.lang.PersistentVector;
 import clojure.lang.Var;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -24,20 +26,40 @@ public class State {
   private int errorsPos = -1;
   private boolean done = false;
 
+  public final Map<Step, List<Step>> rats = new HashMap<>();
+
   private static class Step {
-    public Object rule;
+    public final Object rule;
     public final int pos;
-    public String value;
-    // idea: add originalRule and originatingStepsIndex fields, for
-    //       filling ratpack cache on backtrack
+    public String value = null;
+    public boolean success = false;
+    public int ruleIndex;
 
     public Step(final Object rule, final int pos) {
       this.rule = rule;
       this.pos = pos;
+      this.ruleIndex = rule instanceof List ? 0 : -1;
     }
 
     public String toString() {
-      return rule +"@"+ pos + (value != null ? "="+ value : "");
+      return rule
+        + (ruleIndex != -1 ? ":"+ ruleIndex : "")
+        + (success ? "!" : "")
+        + "@" + pos
+        + (value != null ? "="+ value : "");
+    }
+
+    public int hashCode() {
+      return rule.hashCode();
+    }
+
+    public boolean equals(final Object obj) {
+      if (obj instanceof Step) {
+        final Step other = (Step)obj;
+        return other.rule.equals(this.rule) && other.pos == this.pos;
+      } else {
+        return false;
+      }
     }
   }
 
@@ -62,7 +84,10 @@ public class State {
     final Object rule = lastStep.rule;
     final int pos = lastStep.pos;
 
-    if (rule instanceof List) {
+    final List<Step> pack = rats.get(lastStep);
+    if (pack != null) {
+      steps.addAll(pack); // optimize that last terminal is parsed again
+    } else if (rule instanceof List) {
       steps.add(new Step(((List)rule).get(0), pos));
     } else if (rule instanceof Keyword) {
       steps.add(new Step(grammar.get(rule), pos));
@@ -72,6 +97,19 @@ public class State {
         forward(matcher.group());
       } else {
         backward(String.format("Expected match of '%s'", rule));
+      }
+    } else if (rule instanceof String) {
+      final String stringRule = (String)rule;
+      if (input.startsWith(stringRule, pos)) {
+        forward(stringRule);
+      } else {
+        backward(String.format("Expected string '%s'", rule));
+      }
+    } else if (rule instanceof Character) {
+      if (input.charAt(pos) == ((Character)rule).charValue()) {
+        forward(rule.toString());
+      } else {
+        backward(String.format("Expected character '%s'", rule));
       }
     }
   }
@@ -92,12 +130,14 @@ public class State {
       final Object rule = step.rule;
       if (rule instanceof List) {
         final List listRule = (List)rule;
-        if (listRule.size() > 1 && !listRule.get(1).equals(SLASH)) {
-          step.rule = listRule.subList(1, listRule.size()); // optimize?
-          steps.add(new Step(listRule.get(1), newPos));
+        if (listRule.size() > step.ruleIndex+1 &&
+            !listRule.get(step.ruleIndex+1).equals(SLASH)) {
+          step.ruleIndex += 1;
+          steps.add(new Step(listRule.get(step.ruleIndex), newPos));
           break;
         }
       }
+      step.success = true;
     }
 
     if (i == -1) {
@@ -117,24 +157,34 @@ public class State {
 
     updateErrors(error, pos);
 
+    final LinkedList<Step> pack = new LinkedList<>();
+
     int i = lastIndex;
     for (; i >= 0; i--) {
       final Step step = steps.get(i);
       final Object rule = step.rule;
-      if (rule instanceof List) {
+      if (rule instanceof List && !step.success) {
         final List listRule = (List)rule;
-        final int ai = listRule.indexOf(SLASH);
+        final int ai = listRule.subList(step.ruleIndex, listRule.size()).indexOf(SLASH);
         if (ai >= 0) {
-          step.rule = listRule.subList(ai, listRule.size()); // optimize?
+          step.ruleIndex += ai;
           forward(null);
           break;
         }
+      }
+
+      if (step.success) {
+        pack.addFirst(step);
       }
       steps.remove(i);
     }
 
     if (i == -1) {
       done = true;
+    } else {
+      for (i = 0; i < pack.size()-1; i++) {
+        rats.put(pack.get(i), pack.subList(i+1, pack.size()));
+      }
     }
   }
 

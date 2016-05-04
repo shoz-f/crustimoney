@@ -15,6 +15,13 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+// TODO
+// - line and column for error(s)
+// - result export(s) and transformations
+// - step-by-step parsing / debugging (a better API that is)?
+// - partial/incremental parsing
+// - rule rewriting with ?, + and *
+
 public class State {
 
   private final IFn SLASH;

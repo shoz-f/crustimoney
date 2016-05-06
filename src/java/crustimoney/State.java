@@ -3,53 +3,52 @@ package crustimoney;
 import clojure.java.api.Clojure;
 import clojure.lang.IFn;
 import clojure.lang.Keyword;
+import clojure.lang.PersistentHashMap;
 import clojure.lang.PersistentVector;
+import clojure.lang.Symbol;
 import clojure.lang.Var;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.TreeMap;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
-import java.util.Stack;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 // TODO
-// - pos to line and column (automatic for error set)
-// - result export(s) and transformations
+// - result immutable export (and transformations?)
 // - step-by-step parsing / debugging (a better API that is)?
 // - rule rewriting with ?, + and *
 // - left recursion detection
 // - packrat configuration (configure minimal pack length, limit rats by max number per rule, etc)
-// - have it use EDN (as a dep, for both Java and Clojure API)
 // - check grammar for errors
 // - support cuts?
 // - add interrupt? (or have API clients use advance themselves for their own control)
+// - make State immutable? does mean recreating all Steps on incremental parse
+// - keep String grammar parsing or make it Clojure only?
 
 public class State {
 
-  private final IFn SLASH;
-
   private final Map<Keyword, Object> grammar;
   private final Keyword start;
-  private String input;
   private final List<Step> steps = new ArrayList<>();
   private final Set<String> errors = new HashSet<>();
+  private final Map<Step, List<Step>> rats = new HashMap<>();
+  private final TreeMap<Integer, Integer> lines = new TreeMap<>();
+  private String input;
   private int errorsPos = -1;
   private boolean done = false;
-
-  public final Map<Step, List<Step>> rats = new HashMap<>();
 
   private static class Step {
     public final Object rule;
     public int pos;
+    public int endPos = -1;
     public String value = null;
     public int ruleIndex;
-    public int endPos = -1;
 
     public Step(final Object rule, final int pos) {
       this.rule = rule;
@@ -88,8 +87,10 @@ public class State {
     this.start = start;
     this.input = input;
     steps.add(new Step(start, 0));
+  }
 
-    SLASH = (IFn)((Var)Clojure.var("clojure.core", "/")).deref();
+  public State(final String grammar, final String start, final String input) {
+    this((Map<Keyword, Object>)safeReadClj(grammar), (Keyword)safeReadClj(start), input);
   }
 
   public static State parse(final Map<Keyword, Object> grammar, final Keyword start, final String input) {
@@ -97,8 +98,12 @@ public class State {
     while (!state.isDone()) {
       state.advance();
     }
-    //rats.clear();
+    state.rats.clear();
     return state;
+  }
+
+  public static State parse(final String grammar, final String start, final String input) {
+    return parse((Map<Keyword, Object>)safeReadClj(grammar), (Keyword)safeReadClj(start), input);
   }
 
   public void reparse(final String part, final int replaceAt, final int replaceLength) {
@@ -107,20 +112,20 @@ public class State {
     rats.clear();
 
     for (int i = 0; i < steps.size(); i++) {
-      final Step rat = steps.get(i);
-      if (rat.pos > replaceAt + replaceLength || rat.endPos <= replaceAt) {
-        if (rat.rule instanceof Keyword) {
+      final Step step = steps.get(i);
+      if (step.pos > replaceAt + replaceLength || step.endPos <= replaceAt) {
+        if (step.rule instanceof Keyword && step.isDone()) {
           final List<Step> pack = new LinkedList<>();
           for (int j = i + 1; j < steps.size(); j++) {
             final Step other = steps.get(j);
-            if (other.pos >= rat.pos && other.endPos <= rat.endPos) {
+            if (other.pos >= step.pos && other.endPos <= step.endPos) {
               pack.add(other);
             } else {
               break;
             }
           }
           if (!pack.isEmpty()) {
-            rats.put(rat, pack);
+            rats.put(step, pack);
           }
         }
       }
@@ -147,6 +152,7 @@ public class State {
     steps.add(new Step(start, 0));
     errors.clear();
     errorsPos = -1;
+    lines.clear();
     done = false;
   }
 
@@ -182,11 +188,30 @@ public class State {
       } else {
         backward(String.format("Expected character '%s'", rule));
       }
+    } else if (rule instanceof Symbol) {
+      final String symbolRule = rule.toString();
+      if (input.startsWith(symbolRule, pos)) {
+        forward(symbolRule);
+      } else {
+        backward(String.format("Expected string '%s'", rule));
+      }
     }
   }
 
   public boolean isDone() {
     return done;
+  }
+
+  public int[] posToLineColumn(final int pos) {
+    if (lines.isEmpty()) {
+      fillLines();
+    }
+
+    final Entry<Integer, Integer> floor = lines.floorEntry(pos);
+    final int column = pos - floor.getKey() + 1;
+    final int line = floor.getValue();
+
+    return new int[] {line, column};
   }
 
   private void forward(final String value) {
@@ -269,7 +294,37 @@ public class State {
     errors.add(error);
   }
 
+  private static Object safeReadClj(final String grammar) {
+    return WITH_BINDINGS.invoke(BINDINGS, READ_STRING, grammar);
+  }
+
+  private void fillLines() {
+    int line = 1;
+    char c1 = 0;
+    char c2 = 0;
+    for (int p = 0; p < input.length(); p++) {
+      c1 = input.charAt(p);
+      c2 = p + 1 < input.length() ? input.charAt(p+1) : 0;
+
+      if (c1 == '\r' && c2 == '\n') {
+        line++;
+        p++;
+        lines.put(p+1, line);
+      } else if (c1 == '\r' || c1 == '\n') {
+        line++;
+        lines.put(p+1, line);
+      }
+    }
+    lines.put(0, 1);
+  }
+
   public String toString() {
     return "[State: steps="+ steps +" errors="+ errors +"@"+ errorsPos +"]";
   }
+
+  private static final Symbol SLASH = Symbol.intern("/");
+  private static final Var READ_EVAL = (Var)Clojure.var("clojure.core", "*read-eval*");
+  private static final IFn WITH_BINDINGS = Clojure.var("clojure.core", "with-bindings*");
+  private static final IFn READ_STRING = Clojure.var("clojure.core", "read-string");
+  private static final PersistentHashMap BINDINGS = PersistentHashMap.create(READ_EVAL, false);
 }

@@ -27,156 +27,125 @@ import java.util.regex.Pattern;
 // - check grammar for errors
 // - support cuts?
 
-/**
- * We want to parse some text input, using the datastructure-based
- * grammar directly. This needs to be done in such a way that we do
- * not build a (too) large stack of function/method calls. Thus, we
- * require a structure/object that keeps track of the state while
- * parsing, and some functions on this state to advance the state.
- *
- * The State class below is a structure that does just that. In this
- * case it is implemented in Java, to leverage mutability for speed,
- * but the model we will use works just as well in a functional,
- * immutable fashion.
- *
- * Let's define our class State.
- */
+// We want to parse some text input, using the datastructure-based
+// grammar directly. This needs to be done in such a way that we do
+// not build a (too) large stack of function/method calls. Thus, we
+// require a structure/object that keeps track of the state while
+// parsing, and some functions on this state to advance the state.
+//
+// The State class below is a structure that does just that. In this
+// case it is implemented in Java, to leverage mutability for speed,
+// but the model we will use works just as well in a functional,
+// immutable fashion.
+//
+// Let's define our class State.
 public class State {
 
-  /**
-   * We store our grammar in the State object, because we constantly
-   * need it when parsing. A grammar is a mapping from keywords to
-   * grammar rules. There are three type of rules.
-   *
-   * A rule can be a keyword, to refer to anothor grammar rule. A rule
-   * can be a terminal, such as a String or a regular expression,
-   * which are used to define the tokens.
-   *
-   * A rule can also be a List, having a sequence of grammar rules
-   * that must be parsed succesively. Multiple sequences can be
-   * defined inside this List, separated by a slash. If the first
-   * sequence fails to parse, the second will be tried, and so on.
-   */
+  // We store our grammar in the State object, because we constantly
+  // need it when parsing. A grammar is a mapping from keywords to
+  // grammar rules. There are three type of rules.
+  //
+  // A rule can be a keyword, to refer to anothor grammar rule. A rule
+  // can be a terminal, such as a String or a regular expression,
+  // which are used to define the tokens.
+  //
+  // A rule can also be a List, having a sequence of grammar rules
+  // that must be parsed succesively. Multiple sequences can be
+  // defined inside this List, separated by a slash. If the first
+  // sequence fails to parse, the second will be tried, and so on.
   private final Map<Keyword, Object> grammar;
 
-  /**
-   * In order to know where our grammar starts, we keep track of
-   * the keyword pointing to the first grammar rule.
-   */
+  // In order to know where our grammar starts, we keep track of
+  // the keyword pointing to the first grammar rule.
   private final Keyword start;
 
-  /**
-   * Of course, we also keep track of the input text. During parsing,
-   * this object does not change. However, one of the features of this
-   * parser is to incrementially change the input, therefore it is not
-   * declared final.
-   */
+  // Of course, we also keep track of the input text. During parsing,
+  // this object does not change. However, one of the features of this
+  // parser is to incrementially change the input, therefore it is not
+  // declared final.
   private String input;
 
-  /**
-   * Now that we have defined our static values, we come to the heart
-   * of the parsing algorithm: the steps. The state in which the
-   * parser is at any point in time, is tracked inside this list. This
-   * list grows and shrinks during parsing, and contains Step objects.
-   *
-   * Later we'll discuss what a Step contains and how this steps list
-   * is used, but for now it it sufficient to know that a Step
-   * contains a grammar rule and the position it is at regarding the
-   * input text.
-   *
-   * We create an ArrayList here, because we need random access a lot
-   * while parsing.
-   */
+  // Now that we have defined our static values, we come to the heart
+  // of the parsing algorithm: the steps. The state in which the
+  // parser is at any point in time, is tracked inside this list. This
+  // list grows and shrinks during parsing, and contains Step objects.
+  //
+  // Later we'll discuss what a Step contains and how this steps list
+  // is used, but for now it it sufficient to know that a Step
+  // contains a grammar rule and the position it is at regarding the
+  // input text.
+  //
+  // We create an ArrayList here, because we need random access a lot
+  // while parsing.
   private final List<Step> steps = new ArrayList<>();
 
-  /**
-   * We also keep track of errors during parsing. The errors Set
-   * contains the errors that were found at the errorsPos integer
-   * below. Whenever an error is found, it is added to the Set.
-   * However, the set is cleared whenever this error was found
-   * on a different position than the errorsPos field.
-   */
+  // We also keep track of errors during parsing. The errors Set
+  // contains the errors that were found at the errorsPos integer
+  // below. Whenever an error is found, it is added to the Set.
+  // However, the set is cleared whenever this error was found
+  // on a different position than the errorsPos field.
   private final Set<String> errors = new HashSet<>();
   private int errorsPos = -1;
 
-  /**
-   * We also want to know whether the algorithm finds that it is
-   * done parsing, either successfully or not.
-   */
+  // We also want to know whether the algorithm finds that it is
+  // done parsing, either successfully or not.
   private boolean done = false;
 
-  /**
-   * To speed up the parsing process, this parser implements the
-   * packrat pattern. The rats Map maps previously and successfully
-   * parsed Step objects to the Step objects that followed that Step.
-   * How this rats Map is used, is discussed further on in the
-   * `advance` and `backward` methods.
-   */
+  // To speed up the parsing process, this parser implements the
+  // packrat pattern. The rats Map maps previously and successfully
+  // parsed Step objects to the Step objects that followed that Step.
+  // How this rats Map is used, is discussed further on in the
+  // `advance` and `backward` methods.
   private final Map<Step, List<Step>> rats = new HashMap<>();
 
-  /**
-   * As previously stated, the parser uses a position number to keep
-   * track of where it is (or was) in the input. A more human friendly
-   * representation is the combination of a line number and the column
-   * number. The lines TreeMap below acts as a cache whenever this
-   * representation is requested through the `posToLineColumn` method.
-   *
-   * The Map maps position numbers that are at a new line, to the line
-   * number they start. For instance, position 0 always maps to line
-   * 1.
-   */
+  // As previously stated, the parser uses a position number to keep
+  // track of where it is (or was) in the input. A more human friendly
+  // representation is the combination of a line number and the column
+  // number. The lines TreeMap below acts as a cache whenever this
+  // representation is requested through the `posToLineColumn` method.
+  //
+  // The Map maps position numbers that are at a new line, to the line
+  // number they start. For instance, position 0 always maps to line
+  // 1.
   private final TreeMap<Integer, Integer> lines = new TreeMap<>();
 
 
-  /**
-   * Now that we have our fields defined, we need to define what a
-   * Step actually represents.
-   */
+  // Now that we have our fields defined, we need to define what a
+  // Step actually represents.
   public static class Step {
-
-    /**
-     * The core of a Step is declaring that a grammar rule will or is
-     * parsed at a certain position in the input. Again, this grammar
-     * rule can be a Keyword, a terminal or a List. The position
-     * number does not change during parsing. However, since
-     * incremental parsing is supported, the pos field may change
-     * between parses, therefore it is not declared final.
-     */
+    // The core of a Step is declaring that a grammar rule will or is
+    // parsed at a certain position in the input. Again, this grammar
+    // rule can be a Keyword, a terminal or a List. The position
+    // number does not change during parsing. However, since
+    // incremental parsing is supported, the pos field may change
+    // between parses, therefore it is not declared final.
     private final Object rule;
     private int pos;
 
-    /**
-     * Whenever the grammar rule object is a List, the Step also keeps
-     * track of where the parsing is (or was) in that List. We will
-     * see later how this works exactly.
-     *
-     * Because of this ruleIndex field, the List rule object is never
-     * changed, which is important for the hashCode and equals
-     * implementation of Step.
-     */
+    // Whenever the grammar rule object is a List, the Step also keeps
+    // track of where the parsing is (or was) in that List. We will
+    // see later how this works exactly.
+    //
+    // Because of this ruleIndex field, the List rule object is never
+    // changed, which is important for the hashCode and equals
+    // implementation of Step.
     private int ruleIndex;
 
-    /**
-     * If a Step is parsed successfully, the end position is recorded
-     * as well.
-     *
-     * Recording this position has two benefits. Firstly, we need to
-     * know whether a Step is successfully parsed already whenever we
-     * backtrack (we will see this later on). Secondly, we need this
-     * end position for the incremental parsing.
-     */
+    // If a Step is parsed successfully, the end position is recorded
+    // as well.
+    //
+    // Recording this position has two benefits. Firstly, we need to
+    // know whether a Step is successfully parsed already whenever we
+    // backtrack (we will see this later on). Secondly, we need this
+    // end position for the incremental parsing.
     private int endPos = -1;
 
-    /**
-     * If the grammar rule of a Step is a terminal, and it is parsed
-     * succesfully, its value is recorded inside the Step as well.
-     */
+    // If the grammar rule of a Step is a terminal, and it is parsed
+    // succesfully, its value is recorded inside the Step as well.
     private String value = null;
 
-    /**
-     * Creating a new Step is private to the parser. It only requires
-     * the core fields of a Step: the grammar rule and the position.
-     */
+    // Creating a new Step is private to the parser. It only requires
+    // the core fields of a Step: the grammar rule and the position.
     private Step(final Object rule, final int pos) {
       this.rule = rule;
       this.pos = pos;
@@ -185,11 +154,9 @@ public class State {
       this.ruleIndex = rule instanceof List ? 0 : -1;
     }
 
-    /**
-     * The Step objects are also what is returned as the parsing
-     * result, if successful. Therefore, we need some accessors that
-     * allow read-only access to the Step contents.
-     */
+    // The Step objects are also what is returned as the parsing
+    // result, if successful. Therefore, we need some accessors that
+    // allow read-only access to the Step contents.
     public Object rule() {
       return rule;
     }
@@ -210,21 +177,17 @@ public class State {
       return ruleIndex;
     }
 
-    /**
-     * The parser can ask a Step whether it is done already, which is
-     * important when we backtrack. We know that a Step is done when
-     * the `endPos` field has been set, but this gives us a nice
-     * indirection.
-     */
+    // The parser can ask a Step whether it is done already, which is
+    // important when we backtrack. We know that a Step is done when
+    // the `endPos` field has been set, but this gives us a nice
+    // indirection.
     private boolean isDone() {
       return endPos != -1;
     }
 
-    /**
-     * A toString implementation for debugging is always a good thing
-     * to have. This implementation returns a concise representation
-     * of the Step.
-     */
+    // A toString implementation for debugging is always a good thing
+    // to have. This implementation returns a concise representation
+    // of the Step.
     public String toString() {
       return rule
         + (ruleIndex != -1 ? ":"+ ruleIndex : "")
@@ -233,21 +196,17 @@ public class State {
         + (value != null ? "="+ value : "");
     }
 
-    /**
-     * As we have seen, Step objects are also used as keys inside a
-     * Map. In our case, in the `rats` map. Since the grammar rule
-     * object is the only stable field in a Step, we base our hash
-     * code on that rule only.
-     */
+    // As we have seen, Step objects are also used as keys inside a
+    // Map. In our case, in the `rats` map. Since the grammar rule
+    // object is the only stable field in a Step, we base our hash
+    // code on that rule only.
     public int hashCode() {
       return rule.hashCode();
     }
 
-    /**
-     * The equals implementation then takes the start position in
-     * consideration as well. The other fields are ignored, which is
-     * perfect for the packrat implementation further on.
-     */
+    // The equals implementation then takes the start position in
+    // consideration as well. The other fields are ignored, which is
+    // perfect for the packrat implementation further on.
     public boolean equals(final Object obj) {
       if (obj instanceof Step) {
         final Step other = (Step)obj;
@@ -258,13 +217,11 @@ public class State {
     }
   }
 
-  /**
-   * Now we know what to keep track of and what a Step in the `steps`
-   * list represents. Creating a new parser State, requires the static
-   * parts of the State: the grammar, the start keyword and the
-   * (initial) input. Only those fields are set, and a new State has
-   * been created.
-   */
+  // Now we know what to keep track of and what a Step in the `steps`
+  // list represents. Creating a new parser State, requires the static
+  // parts of the State: the grammar, the start keyword and the
+  // (initial) input. Only those fields are set, and a new State has
+  // been created.
   public State(final Map<Keyword, Object> grammar, final Keyword start, final String input) {
     this.grammar = grammar;
     this.start = start;
@@ -272,25 +229,21 @@ public class State {
     steps.add(new Step(start, 0));
   }
 
-  /**
-   * While this parser uses some Clojure data types (Keyword and
-   * Symbol), it can be used from Java as well. This constructor takes
-   * Strings for the grammar and start keyword. Those Strings should
-   * contain valid Clojure code that represents the grammar. After the
-   * Strings are converted, they are passed to the other contstructor
-   * we defined above.
-   */
+  // While this parser uses some Clojure data types (Keyword and
+  // Symbol), it can be used from Java as well. This constructor takes
+  // Strings for the grammar and start keyword. Those Strings should
+  // contain valid Clojure code that represents the grammar. After the
+  // Strings are converted, they are passed to the other contstructor
+  // we defined above.
   public State(final String grammar, final String start, final String input) {
     this((Map<Keyword, Object>)safeReadClj(grammar), (Keyword)safeReadClj(start), input);
   }
 
-  /**
-   * When a State has been created, we can start to parse! At its
-   * core, parsing is nothing more that calling the `advance` method
-   * (discussed later), until the `done` boolean is set to true. But
-   * because of the incremental parsing, there is a bit more to it.
-   * Follow allong.
-   */
+  // When a State has been created, we can start to parse! At its
+  // core, parsing is nothing more that calling the `advance` method
+  // (discussed later), until the `done` boolean is set to true. But
+  // because of the incremental parsing, there is a bit more to it.
+  // Follow allong.
   public void parse() {
     // First, we clear our packrat cache from the last time, in the
     // rare case it had not been cleared already.
@@ -350,24 +303,22 @@ public class State {
     rats.clear();
   }
 
-  /**
-   * Before we get to what `advance` is about, we show how an
-   * incremental change affects the steps list.
-   *
-   * The user can specify a String that is inserted at a certain
-   * position in the original input, overwriting a certain amount of
-   * existing characters.
-   *
-   * This method makes sure that all the steps that are within the
-   * range of the change are removed. Also, the positions of all the
-   * steps that are after the range of the change, are shifted to
-   * reflect the increase or decrease of the input lenght caused by
-   * the change.
-   *
-   * As you have seen already, the steps that are left after this
-   * method has run, are used at the beginning of the `parse` method,
-   * to fill the packrat cache.
-   */
+  // Before we get to what `advance` is about, we show how an
+  // incremental change affects the steps list.
+  //
+  // The user can specify a String that is inserted at a certain
+  // position in the original input, overwriting a certain amount of
+  // existing characters.
+  //
+  // This method makes sure that all the steps that are within the
+  // range of the change are removed. Also, the positions of all the
+  // steps that are after the range of the change, are shifted to
+  // reflect the increase or decrease of the input lenght caused by
+  // the change.
+  //
+  // As you have seen already, the steps that are left after this
+  // method has run, are used at the beginning of the `parse` method,
+  // to fill the packrat cache.
   public void increment(final String part, final int replaceAt, final int replaceLength) {
     // First, set the new input.
     input = input.substring(0, replaceAt) + part + input.substring(replaceAt + replaceLength);
@@ -397,13 +348,11 @@ public class State {
     }
   }
 
-  /**
-   * Now we get to one of the three methods that perform the parsing.
-   * To advance the current state to the next state, we take a look at
-   * the step that is at the end of the steps list. This is the step
-   * we will try to process. How it is processed, depends on the type
-   * of the grammar rule. Follow along:
-   */
+  // Now we get to one of the three methods that perform the parsing.
+  // To advance the current state to the next state, we take a look at
+  // the step that is at the end of the steps list. This is the step
+  // we will try to process. How it is processed, depends on the type
+  // of the grammar rule. Follow along:
   public void advance() {
     // We get the last step in the steps list.
     final Step lastStep = steps.get(steps.size() - 1);
@@ -477,16 +426,14 @@ public class State {
     }
   }
 
-  /**
-   * So lets discuss what happens when we backtrack "forward", i.e. on
-   * a successful match of a terminal rule.
-   *
-   * A successful match yields a value, which is given to this method.
-   * The current step (the last step in the steps list), is given this
-   * value.
-   *
-   * Next, we need to find the next rule to parse. Follow along below:
-   */
+  // So lets discuss what happens when we backtrack "forward", i.e. on
+  // a successful match of a terminal rule.
+  //
+  // A successful match yields a value, which is given to this method.
+  // The current step (the last step in the steps list), is given this
+  // value.
+  //
+  // Next, we need to find the next rule to parse. Follow along below:
   private void forward(final String value) {
     // First we get the current (last) step.
     final int lastIndex = steps.size() - 1;
@@ -548,12 +495,10 @@ public class State {
     }
   }
 
-  /**
-   * What then does backtracking "backward" mean? It is similar to
-   * backtracking forward, in that we iterate over the steps list,
-   * starting at the end, trying to find a sequence (a List) that
-   * offers an alternative.
-   */
+  // What then does backtracking "backward" mean? It is similar to
+  // backtracking forward, in that we iterate over the steps list,
+  // starting at the end, trying to find a sequence (a List) that
+  // offers an alternative.
   private void backward(final String error) {
     // First we get the current (last) step.
     final int lastIndex = steps.size() - 1;
@@ -619,11 +564,9 @@ public class State {
     }
   }
 
-  /**
-   * Now you have seen everything there is concerning the core of the
-   * parsing algorithm. Next we need some accessor methods to get to
-   * the parsed data, in an immutable fashion.
-   */
+  // Now you have seen everything there is concerning the core of the
+  // parsing algorithm. Next we need some accessor methods to get to
+  // the parsed data, in an immutable fashion.
   public boolean isDone() {
     return done;
   }
@@ -644,10 +587,8 @@ public class State {
     return errorsPos;
   }
 
-  /**
-   * The last thing we offer the clients of this parser, is to convert
-   * a input position to its line and column number.
-   */
+  // The last thing we offer the clients of this parser, is to convert
+  // a input position to its line and column number.
   public int[] posToLineColumn(final int pos) {
     // First we fill the cache, if not done so already. This fills the
     // TreeMap we talked about in the beginning.
@@ -667,9 +608,7 @@ public class State {
     return new int[] {line, column};
   }
 
-  /**
-   * Next up are some helper functions and definitions.
-   */
+  // Next up are some helper functions and definitions.
   private void fillLines() {
     int line = 1;
     char c1 = 0;

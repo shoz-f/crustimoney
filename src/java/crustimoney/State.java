@@ -26,8 +26,6 @@ import java.util.regex.Pattern;
 // - packrat configuration (configure minimal pack length, limit rats by max number per rule, etc)
 // - check grammar for errors
 // - support cuts?
-// - literate programming?
-// - expand error messages with what they did encounter?
 
 /**
  * We want to parse some text input, using the datastructure-based
@@ -85,6 +83,9 @@ public class State {
    * is used, but for now it it sufficient to know that a Step
    * contains a grammar rule and the position it is at regarding the
    * input text.
+   *
+   * We create an ArrayList here, because we need random access a lot
+   * while parsing.
    */
   private final List<Step> steps = new ArrayList<>();
 
@@ -157,8 +158,7 @@ public class State {
 
     /**
      * If a Step is parsed successfully, the end position is recorded
-     * as well. Actually, the endPos is the next position of where the
-     * next token is parsed.
+     * as well.
      *
      * Recording this position has two benefits. Firstly, we need to
      * know whether a Step is successfully parsed already whenever we
@@ -269,6 +269,7 @@ public class State {
     this.grammar = grammar;
     this.start = start;
     this.input = input;
+    steps.add(new Step(start, 0));
   }
 
   /**
@@ -349,36 +350,96 @@ public class State {
     rats.clear();
   }
 
+  /**
+   * Before we get to what `advance` is about, we show how an
+   * incremental change affects the steps list.
+   *
+   * The user can specify a String that is inserted at a certain
+   * position in the original input, overwriting a certain amount of
+   * existing characters.
+   *
+   * This method makes sure that all the steps that are within the
+   * range of the change are removed. Also, the positions of all the
+   * steps that are after the range of the change, are shifted to
+   * reflect the increase or decrease of the input lenght caused by
+   * the change.
+   *
+   * As you have seen already, the steps that are left after this
+   * method has run, are used at the beginning of the `parse` method,
+   * to fill the packrat cache.
+   */
   public void increment(final String part, final int replaceAt, final int replaceLength) {
+    // First, set the new input.
     input = input.substring(0, replaceAt) + part + input.substring(replaceAt + replaceLength);
 
+    // Next, we calculate the amount the positions of the steps after
+    // the change need to be shifted.
     final int shiftAmount = part.length() - replaceLength;
+
+    // Now we can iterate over the current steps.
     final Iterator<Step> iterator = steps.iterator();
     while (iterator.hasNext()) {
       final Step step = iterator.next();
+
+      // If the step is after the changed area, we keep the step and
+      // we shift it, when necessary.
       if (step.pos > replaceAt + replaceLength) {
         if (shiftAmount != 0) {
           step.pos += shiftAmount;
           step.endPos += shiftAmount;
         }
-      } else if (!(step.endPos <= replaceAt)) {
+
+      // Otherwise, if the step is not before the changed area,
+      // we remove the step.
+      } else if (!(step.endPos < replaceAt)) {
         iterator.remove();
       }
     }
   }
 
+  /**
+   * Now we get to one of the three methods that perform the parsing.
+   * To advance the current state to the next state, we take a look at
+   * the step that is at the end of the steps list. This is the step
+   * we will try to process. How it is processed, depends on the type
+   * of the grammar rule. Follow along:
+   */
   public void advance() {
+    // We get the last step in the steps list.
     final Step lastStep = steps.get(steps.size() - 1);
     final Object rule = lastStep.rule;
     final int pos = lastStep.pos;
 
+    // First, we check if this step is already known in the packrat
+    // cache. If it is, we know exactly which steps will follow the
+    // current last step, so we can add those already, potentially
+    // skipping a lot of redundant processing.
     final List<Step> pack = rats.get(lastStep);
     if (pack != null) {
-      steps.addAll(pack); // optimize that last terminal is parsed again
+      steps.addAll(pack); // TODO optimize that last terminal is parsed again
+
+    // Otherwise, if the rule is a List, we simply take the first item
+    // of that list, and add that as a step.
     } else if (rule instanceof List) {
       steps.add(new Step(((List)rule).get(0), pos));
+
+    // Otherwise, if the rule is a Keyword, we look up the
+    // corresponding rule in the grammar and add that as a step.
     } else if (rule instanceof Keyword) {
       steps.add(new Step(grammar.get(rule), pos));
+
+    // Now we get to the terminals. All of them try to match the
+    // terminal on the input at the position of the step.
+    //
+    // If it is successful, we will backtrack over the steps list, in
+    // order to find the next rule that needs to be parsed. This is
+    // implemented in the `forward` method.
+    //
+    // If the match fails, we will also backtrack over the steps list,
+    // but now to find the next sequence rule that offers an
+    // alternative. This is implemented in the `backward` method.
+    //
+    // The first terminal parsing logic is for a regular expressions.
     } else if (rule instanceof Pattern) {
       final Matcher matcher = ((Pattern)rule).matcher(input); // optimize?
       if (matcher.find(pos) && matcher.start() == pos) {
@@ -386,6 +447,8 @@ public class State {
       } else {
         backward(String.format("Expected match of '%s'", rule));
       }
+
+    // The next terminal parsing logic is for Strings.
     } else if (rule instanceof String) {
       final String stringRule = (String)rule;
       if (input.startsWith(stringRule, pos)) {
@@ -393,12 +456,17 @@ public class State {
       } else {
         backward(String.format("Expected string '%s'", rule));
       }
+
+    // The next terminal parsing logic is for characters.
     } else if (rule instanceof Character) {
       if (input.charAt(pos) == ((Character)rule).charValue()) {
         forward(rule.toString());
       } else {
         backward(String.format("Expected character '%s'", rule));
       }
+
+    // And the last logic is for Symbol objects, which are considered
+    // to be Strings.
     } else if (rule instanceof Symbol) {
       final String symbolRule = rule.toString();
       if (input.startsWith(symbolRule, pos)) {
@@ -409,6 +477,154 @@ public class State {
     }
   }
 
+  /**
+   * So lets discuss what happens when we backtrack "forward", i.e. on
+   * a successful match of a terminal rule.
+   *
+   * A successful match yields a value, which is given to this method.
+   * The current step (the last step in the steps list), is given this
+   * value.
+   *
+   * Next, we need to find the next rule to parse. Follow along below:
+   */
+  private void forward(final String value) {
+    // First we get the current (last) step.
+    final int lastIndex = steps.size() - 1;
+    final Step lastStep = steps.get(lastIndex);
+
+    // Now we can calculate the new position of the step that will
+    // follow the current last step.
+    final int newPos = value != null ? lastStep.pos + value.length() : lastStep.pos;
+
+    // And we assign the parsed value to the current step.
+    lastStep.value = value;
+
+    // We start iterating over the steps list, starting at the end. If
+    // the rule of that step is a List, we check whether it contains a
+    // next rule that needs to be parsed. That means that it has to
+    // have an element at the Step's `ruleIndex`+1, and that element
+    // should not be a slash (the alternatives divider).
+    //
+    // If the list rule fits this profile, the `ruleIndex` of the step
+    // is increased by one, and the grammar rule at that index in the
+    // list is added as the next step.
+    //
+    // While backtracking, we mark all the steps that we iterate over
+    // as successful, by setting the end position.
+    int i = lastIndex;
+    for (; i >= 0; i--) {
+      final Step step = steps.get(i);
+      final Object rule = step.rule;
+      if (rule instanceof List) {
+        final List listRule = (List)rule;
+        if (listRule.size() > step.ruleIndex+1 &&
+            !listRule.get(step.ruleIndex+1).equals(SLASH)) {
+          step.ruleIndex += 1;
+          steps.add(new Step(listRule.get(step.ruleIndex), newPos));
+          break;
+        }
+      }
+      if (step.endPos == -1) {
+        step.endPos = newPos - 1;
+      }
+    }
+
+    // If we have checked all the steps, and none of the list rules
+    // fits above criteria, we have walked the entire grammar.
+    //
+    // If the length of the input is equal to the new parse position
+    // calculated earlier, we know we are done. Otherwise, we expected
+    // EOF (end of file), and we will try to backtrack "backward".
+    //
+    // Otherwise, a Step has been added to the list, and the next
+    // `advance` invocation will use this newly added step.
+    if (i == -1) {
+      if (newPos != input.length()) {
+        backward("Expected EOF");
+      } else {
+        errors.clear();
+        done = true;
+      }
+    }
+  }
+
+  /**
+   * What then does backtracking "backward" mean? It is similar to
+   * backtracking forward, in that we iterate over the steps list,
+   * starting at the end, trying to find a sequence (a List) that
+   * offers an alternative.
+   */
+  private void backward(final String error) {
+    // First we get the current (last) step.
+    final int lastIndex = steps.size() - 1;
+    final Step lastStep = steps.get(lastIndex);
+    final int pos = lastStep.pos;
+
+    // And we register the given error at the current position
+    updateErrors(error, pos);
+
+    // While backtracking, we will put all the successfully parsed
+    // steps in the packrat cache. This structure keeps track of what
+    // will be put into the cache.
+    final LinkedList<Step> pack = new LinkedList<>();
+
+    // We start iterating over the steps list, from the end, and try
+    // to find a step that has a List as its grammar rule. If that
+    // list has a slash, at its `ruleIndex` or higher, we set the rule
+    // index to the index of that slash.
+    //
+    // All the steps we encounter during iterating are added to the
+    // packrat cache value, if they were succesfully parsed already.
+    int i = lastIndex;
+    for (; i >= 0; i--) {
+      final Step step = steps.get(i);
+      final Object rule = step.rule;
+      if (rule instanceof List && !step.isDone()) {
+        final List listRule = (List)rule;
+        final int ai = listRule.subList(step.ruleIndex, listRule.size()).indexOf(SLASH);
+        if (ai >= 0) {
+          step.ruleIndex += ai;
+          forward(null);
+          break;
+        }
+      }
+
+      if (step.isDone()) {
+        pack.addFirst(step);
+      }
+    }
+
+    // If we could not find a step with a sequence (List) rule that
+    // had an alternative left, we are done parsing. This parsing
+    // session will then be unsuccessful.
+    //
+    // Otherwise, we add the packrat cache value to the packrat cache,
+    // and remove the steps after the one offering an alternative.
+    //
+    // The next invocation of `advance` will use the now last step
+    // with a sequence rule, with its index set to just before the
+    // next alternative.
+    if (i == -1) {
+      done = true;
+    } else {
+      // Remove the steps we backtracked over.
+      for (int j = lastIndex; j > i; j--) {
+        steps.remove(j);
+      }
+
+      // Add the pack to the packrat cache, with each element being
+      // the packrat key step.
+      for (int r = 0; r < pack.size()-1; r++) {
+        rats.put(pack.get(r), pack.subList(r+1, pack.size()));
+      }
+    }
+  }
+
+  /**
+   * Now you have seen everything there is concerning the core of the
+   * parsing algorithm. Next we need some accessor methods to get to
+   * the parsed data, in an immutable fashion.
+   */
   public boolean isDone() {
     return done;
   }
@@ -429,11 +645,22 @@ public class State {
     return errorsPos;
   }
 
+  /**
+   * The last thing we offer the clients of this parser, is to convert
+   * a input position to its line and column number.
+   */
   public int[] posToLineColumn(final int pos) {
+    // First we fill the cache, if not done so already. This fills the
+    // TreeMap we talked about in the beginning.
     if (lines.isEmpty()) {
       fillLines();
     }
 
+    // Now we get the position key that is exactly or directly below
+    // the given position. This way we know that the column is the
+    // given position minus the found position key (which is where a
+    // line starts). The value of the key is the actual line that is
+    // started at that key position.
     final Entry<Integer, Integer> floor = lines.floorEntry(pos);
     final int column = pos - floor.getKey() + 1;
     final int line = floor.getValue();
@@ -441,90 +668,9 @@ public class State {
     return new int[] {line, column};
   }
 
-  private void forward(final String value) {
-    final int lastIndex = steps.size() - 1;
-    final Step lastStep = steps.get(lastIndex);
-    final int newPos = value != null ? lastStep.pos + value.length() : lastStep.pos;
-    lastStep.value = value;
-
-    int i = lastIndex;
-    for (; i >= 0; i--) {
-      final Step step = steps.get(i);
-      final Object rule = step.rule;
-      if (rule instanceof List) {
-        final List listRule = (List)rule;
-        if (listRule.size() > step.ruleIndex+1 &&
-            !listRule.get(step.ruleIndex+1).equals(SLASH)) {
-          step.ruleIndex += 1;
-          steps.add(new Step(listRule.get(step.ruleIndex), newPos));
-          break;
-        }
-      }
-      if (step.endPos == -1) {
-        step.endPos = newPos;
-      }
-    }
-
-    if (i == -1) {
-      if (newPos != input.length()) {
-        backward("Expected EOF");
-      } else {
-        errors.clear();
-        done = true;
-      }
-    }
-  }
-
-  private void backward(final String error) {
-    final int lastIndex = steps.size() - 1;
-    final Step lastStep = steps.get(lastIndex);
-    final int pos = lastStep.pos;
-
-    updateErrors(error, pos);
-
-    final LinkedList<Step> pack = new LinkedList<>();
-
-    int i = lastIndex;
-    for (; i >= 0; i--) {
-      final Step step = steps.get(i);
-      final Object rule = step.rule;
-      if (rule instanceof List && !step.isDone()) {
-        final List listRule = (List)rule;
-        final int ai = listRule.subList(step.ruleIndex, listRule.size()).indexOf(SLASH);
-        if (ai >= 0) {
-          step.ruleIndex += ai;
-          forward(null);
-          break;
-        }
-      }
-
-      if (step.isDone()) {
-        pack.addFirst(step);
-      }
-      steps.remove(i);
-    }
-
-    if (i == -1) {
-      done = true;
-    } else {
-      for (i = 0; i < pack.size()-1; i++) {
-        rats.put(pack.get(i), pack.subList(i+1, pack.size()));
-      }
-    }
-  }
-
-  private void updateErrors(final String error, final int atPos) {
-    if (atPos != errorsPos) {
-      errors.clear();
-    }
-    errorsPos = atPos;
-    errors.add(error);
-  }
-
-  private static Object safeReadClj(final String grammar) {
-    return WITH_BINDINGS.invoke(BINDINGS, READ_STRING, grammar);
-  }
-
+  /**
+   * Next up are some helper functions and definitions.
+   */
   private void fillLines() {
     int line = 1;
     char c1 = 0;
@@ -544,6 +690,19 @@ public class State {
     }
     lines.put(0, 1);
   }
+
+  private void updateErrors(final String error, final int atPos) {
+    if (atPos != errorsPos) {
+      errors.clear();
+    }
+    errorsPos = atPos;
+    errors.add(error);
+  }
+
+  private static Object safeReadClj(final String grammar) {
+    return WITH_BINDINGS.invoke(BINDINGS, READ_STRING, grammar);
+  }
+
 
   public String toString() {
     return "[State: steps="+ steps +" errors="+ errors +"@"+ errorsPos +"]";

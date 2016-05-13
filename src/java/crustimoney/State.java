@@ -584,7 +584,6 @@ public class State {
         final int ai = listRule.subList(step.ruleIndex, listRule.size()).indexOf(SLASH);
         if (ai >= 0) {
           step.ruleIndex += ai;
-          forward(null);
           break;
         }
       }
@@ -600,10 +599,6 @@ public class State {
     //
     // Otherwise, we add the packrat cache value to the packrat cache,
     // and remove the steps after the one offering an alternative.
-    //
-    // The next invocation of `advance` will use the now last step
-    // with a sequence rule, with its index set to just before the
-    // next alternative.
     if (i == -1) {
       done = true;
     } else {
@@ -617,6 +612,10 @@ public class State {
       for (int r = 0; r < pack.size()-1; r++) {
         rats.put(pack.get(r), pack.subList(r+1, pack.size()));
       }
+
+      // Now we try to move forward again, which will use the
+      // alternative sequence of the step we just altered.
+      forward(null);
     }
   }
 

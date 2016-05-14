@@ -210,7 +210,7 @@ public class State {
     public boolean equals(final Object obj) {
       if (obj instanceof Step) {
         final Step other = (Step)obj;
-        return obj == other || (other.rule.equals(this.rule) && other.pos == this.pos);
+        return other.rule.equals(this.rule) && other.pos == this.pos;
       } else {
         return false;
       }
